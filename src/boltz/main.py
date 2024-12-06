@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 import click
 import torch
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_only
 from tqdm import tqdm
@@ -163,29 +163,31 @@ def check_inputs(
 
 def compute_msa(
     data: dict[str, str],
+    target_id: str,
     msa_dir: Path,
     msa_server_url: str,
     msa_pairing_strategy: str,
-) -> list[Path]:
+) -> None:
     """Compute the MSA for the input data.
 
     Parameters
     ----------
     data : dict[str, str]
         The input protein sequences.
+    target_id : str
+        The target id.
     msa_dir : Path
-        The msa temp directory.
-
-    Returns
-    -------
-    list[Path]
-        The list of MSA files.
+        The msa directory.
+    msa_server_url : str
+        The MSA server URL.
+    msa_pairing_strategy : str
+        The MSA pairing strategy.
 
     """
     if len(data) > 1:
         paired_msas = run_mmseqs2(
             list(data.values()),
-            msa_dir / "tmp",
+            msa_dir / f"{target_id}_paired_tmp",
             use_env=True,
             use_pairing=True,
             host_url=msa_server_url,
@@ -196,7 +198,7 @@ def compute_msa(
 
     unpaired_msa = run_mmseqs2(
         list(data.values()),
-        msa_dir / "tmp",
+        msa_dir / f"{target_id}_unpaired_tmp",
         use_env=True,
         use_pairing=False,
         host_url=msa_server_url,
@@ -217,6 +219,8 @@ def compute_msa(
         unpaired = unpaired_msa[idx].strip().splitlines()
         unpaired = unpaired[1::2]
         unpaired = unpaired[: (const.max_msa_seqs - len(paired))]
+        if paired:
+            unpaired = unpaired[1:]  # ignore query is already present
 
         # Combine
         seqs = paired + unpaired
@@ -251,7 +255,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
     ccd_path : Path
         The path to the CCD dictionary.
     max_msa_seqs : int, optional
-        Max number of MSA seuqneces, by default 4096.
+        Max number of MSA sequences, by default 4096.
     use_msa_server : bool, optional
         Whether to use the MMSeqs2 server for MSA generation, by default False.
 
@@ -324,14 +328,15 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
             msg = f"Generating MSA for {path} with {len(to_generate)} protein entities."
             click.echo(msg)
             compute_msa(
-                to_generate,
-                msa_dir,
+                data=to_generate,
+                target_id=target_id,
+                msa_dir=msa_dir,
                 msa_server_url=msa_server_url,
                 msa_pairing_strategy=msa_pairing_strategy,
             )
 
         # Parse MSA data
-        msas = {c.msa_id for c in target.record.chains if c.msa_id != -1}
+        msas = sorted({c.msa_id for c in target.record.chains if c.msa_id != -1})
         msa_id_map = {}
         for msa_idx, msa_id in enumerate(msas):
             # Check that raw MSA exists
@@ -352,7 +357,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                         max_seqs=max_msa_seqs,
                     )
                 elif msa_path.suffix == ".csv":
-                    msa: MSA = parse_csv(msa_path)
+                    msa: MSA = parse_csv(msa_path, max_seqs=max_msa_seqs)
                 else:
                     msg = f"MSA file {msa_path} not supported, only a3m or csv."
                     raise RuntimeError(msg)
@@ -462,6 +467,12 @@ def cli() -> None:
     help="Whether to override existing found predictions. Default is False.",
 )
 @click.option(
+    "--seed",
+    type=int,
+    help="Seed to use for random number generator. Default is None (no seeding).",
+    default=None,
+)
+@click.option(
     "--use_msa_server",
     is_flag=True,
     help="Whether to use the MMSeqs2 server for MSA generation. Default is False.",
@@ -493,6 +504,7 @@ def predict(
     output_format: Literal["pdb", "mmcif"] = "mmcif",
     num_workers: int = 2,
     override: bool = False,
+    seed: Optional[int] = None,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_pairing_strategy: str = "greedy",
@@ -508,6 +520,10 @@ def predict(
 
     # Ignore matmul precision warning
     torch.set_float32_matmul_precision("highest")
+
+    # Set seed if desired
+    if seed is not None:
+        seed_everything(seed)
 
     # Set cache path
     cache = Path(cache).expanduser()
