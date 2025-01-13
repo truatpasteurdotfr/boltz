@@ -123,9 +123,6 @@ class Boltz1(LightningModule):
             "resolved_loss",
             "pde_loss",
             "pae_loss",
-            "rel_plddt_loss",
-            "rel_pde_loss",
-            "rel_pae_loss",
         ]:
             self.train_confidence_loss_dict_logger[m] = MeanMetric()
 
@@ -442,12 +439,17 @@ class Boltz1(LightningModule):
                 out,
                 batch,
             )
-            diffusion_loss_dict = self.structure_module.compute_loss(
-                batch,
-                out,
-                multiplicity=self.training_args.diffusion_multiplicity,
-                **self.diffusion_loss_args,
-            )
+            try:
+                diffusion_loss_dict = self.structure_module.compute_loss(
+                    batch,
+                    out,
+                    multiplicity=self.training_args.diffusion_multiplicity,
+                    **self.diffusion_loss_args,
+                )
+            except Exception as e:
+                print(f"Skipping batch {batch_idx} due to error: {e}")
+                return None
+
         else:
             disto_loss = 0.0
             diffusion_loss_dict = {"loss": 0.0, "loss_breakdown": {}}
@@ -1193,10 +1195,11 @@ class Boltz1(LightningModule):
             checkpoint["ema"] = self.ema.state_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        if self.use_ema and self.ema is None:
+        if self.use_ema and "ema" in checkpoint and self.ema.compatible(checkpoint["ema"]["shadow_params"]):
             self.ema = ExponentialMovingAverage(
                 parameters=self.parameters(), decay=self.ema_decay
             )
+            self.ema.load_state_dict(checkpoint["ema"], device=torch.device("cpu"))
 
     def on_train_start(self):
         if self.use_ema and self.ema is None:
